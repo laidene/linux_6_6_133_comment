@@ -403,14 +403,19 @@ SYM_FUNC_END(idmap_kpti_install_ng_mappings)
 	.pushsection ".idmap.text", "a"
 SYM_FUNC_START(__cpu_setup)
 	tlbi	vmalle1				// Invalidate local TLB
+						/* tlb invalidate   virtual mem all el1 */
 	dsb	nsh
 
 	mov	x1, #3 << 20
 	msr	cpacr_el1, x1			// Enable FP/ASIMD
+						/* arch feat acess ctrl reg */
 	mov	x1, #1 << 12			// Reset mdscr_el1 and disable
 	msr	mdscr_el1, x1			// access to the DCC from EL0
+						/* monitor debug sys ctrl reg */
 	isb					// Unmask debug exceptions now,
 	enable_dbg				// since this is per-cpu
+
+	/* 尝试开启用户态访问pmu和amu */
 	reset_pmuserenr_el0 x1			// Disable PMU access from EL0
 	reset_amuserenr_el0 x1			// Disable AMU access from EL0
 
@@ -418,7 +423,7 @@ SYM_FUNC_START(__cpu_setup)
 	 * Default values for VMSA control registers. These will be adjusted
 	 * below depending on detected CPU features.
 	 */
-	mair	.req	x17
+	mair	.req	x17		/* 伪指令 起别名 */
 	tcr	.req	x16
 	mov_q	mair, MAIR_EL1_SET
 	mov_q	tcr, TCR_TxSZ(VA_BITS) | TCR_CACHE_FLAGS | TCR_SMP_FLAGS | \

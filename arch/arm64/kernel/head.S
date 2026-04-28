@@ -52,21 +52,32 @@
  * Note that the callee-saved registers are used for storing variables
  * that are useful before the MMU is enabled. The allocations are described
  * in the entry routines.
+ *
+ * 此处打赏断点
+ *	1 查看dtb的物理起始地址 P /x $x0
+ *	2 检查dtb魔术和长度    x /8bx 0x48000000
+ *	3 下载dtb文件          dump binary memory kernel.dtb 0x48000000 0x48100000
+ *	4 反汇编               dtc -I dtb -O dts -o kernel.dts kernel.dtb
  */
 	__HEAD
 	/*
 	 * DO NOT MODIFY. Image header expected by Linux boot-loaders.
 	 */
 	efi_signature_nop			// special NOP to identity as PE/COFF executable
+						/* 特殊的nop 标识这个文件是PE/COFF格式的文件 开头是MZ */
+						/* xxd -g 1 -l 16 Image */
 	b	primary_entry			// branch to kernel start, magic
 	.quad	0				// Image load offset from start of RAM, little-endian
 	le64sym	_kernel_size_le			// Effective size of kernel image, little-endian
+						/* 内核镜像有效大小（image_size 字段，小端） p /x &_text - p /x &_end */
 	le64sym	_kernel_flags_le		// Informative flags, little-endian
+						/* Documentation/arch/arm64/booting.rst:107 bit 0 = 0：小端内核 bit 1-2 = 01b：4K 页 */
 	.quad	0				// reserved
 	.quad	0				// reserved
 	.quad	0				// reserved
-	.ascii	ARM64_IMAGE_MAGIC		// Magic number
+	.ascii	ARM64_IMAGE_MAGIC		// Magic number	"ARM\x64" 四字节0x644d5241 
 	.long	.Lpe_header_offset		// Offset to the PE header.
+						/* PE header 起点 - 镜像起点 本质是 .-.L_head 符号L_head在efi_signature_nop定义 */
 
 	__EFI_PE_HEADER
 
@@ -89,7 +100,7 @@
 SYM_CODE_START(primary_entry)
 	bl	record_mmu_state
 	bl	preserve_boot_args
-	bl	create_idmap
+	bl	create_idmap		/* create identity map head.S:374 [cc]todo */
 
 	/*
 	 * If we entered with the MMU and caches on, clean the ID mapped part
@@ -97,12 +108,15 @@ SYM_CODE_START(primary_entry)
 	 * the MMU off.
 	 */
 	cbz	x19, 0f
-	adrp	x0, __idmap_text_start
+	adrp	x0, __idmap_text_start	/* 如果一开始就是MMU和D-cache开着进入内核，才要先清 */
 	adr_l	x1, __idmap_text_end
 	adr_l	x2, dcache_clean_poc
-	blr	x2
+	blr	x2			/* branch with link to register */
+					/* 调用 dcache_clean_poc(x0, x1)， 把.idmap.text这个段的代码清除缓存 */
 0:	mov	x0, x19
-	bl	init_kernel_el			// w0=cpu_boot_mode
+	bl	init_kernel_el		/* branch with link */
+					/* 把下一条指令地址保存到 x30/lr */
+					/* 到 init_kernel_el 执行 */
 	mov	x20, x0
 
 	/*
@@ -123,19 +137,40 @@ SYM_CODE_START(primary_entry)
 	b	__primary_switch
 SYM_CODE_END(primary_entry)
 
+/**
+ * @brief 记录MMU状态
+ * 
+ * @desc
+ *	读取当前EL等级对应的系统控制寄存器(SCTLR_X)
+ *	判断EE(endianess of data assess on ELX)是否和当前编译字节序相同
+ *		相同: 仅当 C=1(D-Cache) 且 M=1 时，x19 返回 1，否则返回0
+ *		不同: 翻转EE使其与编译字节序相同, 清除M位(关闭MMU),返回0
+ * @x19[out] 1=MMU和D-Cache都开启
+ *	     0=没有同时开启,或者 字节序不匹配，函数修正EE并关闭MMU后返回0
+ */
 	__INIT
 SYM_CODE_START_LOCAL(record_mmu_state)
 	mrs	x19, CurrentEL
 	cmp	x19, #CurrentEL_EL2
-	mrs	x19, sctlr_el1
-	b.ne	0f
+	mrs	x19, sctlr_el1			/* 假设当前等级为EL1, 读取sctlr_el1 */
+	b.ne	0f				/* 如果当前等级不是EL2,那么假设正确,跳过读取sctlr_el2到x19  */
 	mrs	x19, sctlr_el2
 0:
-CPU_LE( tbnz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)
+CPU_LE( tbnz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)	/* test bit and branch if nonzero */
 CPU_BE( tbz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)
 	tst	x19, #SCTLR_ELx_C		// Z := (C == 0)
+						/* 语法 x19与立即数相与,如果结果为1,那么标志Z为为0 */
+						/* 作用 如果x19的C(d-cache)位为1, 那么标志Z位0 */
+						/* C(D-cache)位 */
 	and	x19, x19, #SCTLR_ELx_M		// isolate M bit
+						/* 脱离M位到x19. x19 = x19 & 0x1 */
 	csel	x19, xzr, x19, eq		// clear x19 if Z
+						/* conditional select */
+						/* csel <Wd>, <Wn>, <Wm>, <cond> */
+						/* eq：相等，Z=1 */
+						/* 如果条件 <cond> 成立，<d> = <n>, 否则，<d> = <m> */
+						/* 作用 如果Z=1 说明开启了d-cache 所以 x19最终为 M(mmu)位的实际值 */
+						/* 作用 如果Z=0 说明没开启d-cache 所以 x19=0 */
 	ret
 
 	/*
@@ -144,16 +179,19 @@ CPU_BE( tbz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)
 	 * this means the MMU must be disabled, or the active ID map will end
 	 * up getting interpreted with the wrong byte order.
 	 */
-1:	eor	x19, x19, #SCTLR_ELx_EE
-	bic	x19, x19, #SCTLR_ELx_M
-	b.ne	2f
+1:	eor	x19, x19, #SCTLR_ELx_EE		/* exclusive or 语法 Rd = Rn ^ Operand2 */
+						/* 作用 把x19的EE(endianess of data acess on elx )位反转再赋值给x19 */
+	bic	x19, x19, #SCTLR_ELx_M		/* bit clear    语法 rd = rn & ~Operand2 */
+						/* 作用 清除x19的M(d-cache)位 */
+						/*  */
+	b.ne	2f				/* 根据EL等级,反转对应的系统控制寄存器的EE(endianess of data assess on ELX)位 */
 	pre_disable_mmu_workaround
 	msr	sctlr_el2, x19
 	b	3f
 2:	pre_disable_mmu_workaround
 	msr	sctlr_el1, x19
 3:	isb
-	mov	x19, xzr
+	mov	x19, xzr			/* x19=0 */
 	ret
 SYM_CODE_END(record_mmu_state)
 
@@ -164,15 +202,20 @@ SYM_CODE_START_LOCAL(preserve_boot_args)
 	mov	x21, x0				// x21=FDT
 
 	adr_l	x0, boot_args			// record the contents of
+						/* address local 源头 arch/arm64/kernel/setup.c arch/arm64/include/asm/assembler.h */
 	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry
+						/* store pair 把 x21 写到 [x0] 把 x1 写到 [x0 + 8] */
 	stp	x2, x3, [x0, #16]
 
 	cbnz	x19, 0f				// skip cache invalidation if MMU is on
 	dmb	sy				// needed before dc ivac with
+						/* dmb=data mem barrier, sy= full system */
+						/* 保证当前核心的内存读写顺序 */
 						// MMU off
 
 	add	x1, x0, #0x20			// 4 x 8 bytes
 	b	dcache_inval_poc		// tail call
+						/*  arch/arm64/mm/cache.S */
 0:	str_l   x19, mmu_enabled_at_boot, x0
 	ret
 SYM_CODE_END(preserve_boot_args)
@@ -332,7 +375,7 @@ SYM_FUNC_START_LOCAL(remap_region)
 SYM_FUNC_END(remap_region)
 
 SYM_FUNC_START_LOCAL(create_idmap)
-	mov	x28, lr
+	mov	x28, lr		/* 保存返回地址 */
 	/*
 	 * The ID map carries a 1:1 mapping of the physical address range
 	 * covered by the loaded image, which could be anywhere in DRAM. This
@@ -379,14 +422,15 @@ SYM_FUNC_START_LOCAL(create_idmap)
 	 * translation level, but the top-level table has more entries.
 	 */
 #endif
-	adrp	x0, init_idmap_pg_dir
-	adrp	x3, _text
-	adrp	x6, _end + MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE
-	mov_q	x7, SWAPPER_RX_MMUFLAGS
+	adrp	x0, init_idmap_pg_dir				/* init_idmap_pg_dir 页表基址（链接脚本符号） */
+	adrp	x3, _text					/* 内核镜像起始物理地址（_text 页基址） */
+	adrp	x6, _end + MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE	/* ID map 映射上界：内核末尾 + FDT最大预留区 + 一个块对齐余量 */
+	mov_q	x7, SWAPPER_RX_MMUFLAGS				/* ID map 默认页表属性：普通内存，只读，内核EL1可执行，EL0不可执行 */
 
-	map_memory x0, x1, x3, x6, x7, x3, IDMAP_PGD_ORDER, x10, x11, x12, x13, x14, EXTRA_SHIFT
+	map_memory x0, x1, x3, x6, x7, x3, IDMAP_PGD_ORDER, x10, x11, x12, x13, x14, EXTRA_SHIFT /* 从 _text 开始，到 _end + MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE 为止，建立一段 VA=PA 的早期页表映射，属性为只读可执行 */
 
 	/* Remap the kernel page tables r/w in the ID map */
+	/* 因为前面的 map_memory 先把整段 ID map 粗略建成了默认 RX，但页表本身后面还要写，所以必须把页表所在那段重新标成 RW */
 	adrp	x1, _text
 	adrp	x2, init_pg_dir
 	adrp	x3, init_pg_end
@@ -396,27 +440,28 @@ SYM_FUNC_START_LOCAL(create_idmap)
 	bl	remap_region
 
 	/* Remap the FDT after the kernel image */
-	adrp	x1, _text
-	adrp	x22, _end + SWAPPER_BLOCK_SIZE
-	bic	x2, x22, #SWAPPER_BLOCK_SIZE - 1
-	bfi	x22, x21, #0, #SWAPPER_BLOCK_SHIFT		// remapped FDT address
-	add	x3, x2, #MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE
-	bic	x4, x21, #SWAPPER_BLOCK_SIZE - 1
-	mov_q	x5, SWAPPER_RW_MMUFLAGS
-	mov	x6, #SWAPPER_BLOCK_SHIFT
-	bl	remap_region
+	/* 通过页表让“内核后面的这段 VA”指向“原来的 FDT PA */
+	adrp	x1, _text					/* 现有 ID map 的起始 VA */
+	adrp	x22, _end + SWAPPER_BLOCK_SIZE			/* FDT 重映射目标区域（位于内核末尾之后） */
+	bic	x2, x22, #SWAPPER_BLOCK_SIZE - 1		/* FDT 重映射窗口起始 VA，按块对齐 */
+	bfi	x22, x21, #0, #SWAPPER_BLOCK_SHIFT		/* 重映射后的 FDT 精确 VA，保留原块内偏移 */
+	add	x3, x2, #MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE	/* FDT 重映射窗口结束 VA（开区间） */
+	bic	x4, x21, #SWAPPER_BLOCK_SIZE - 1		/* 原始 FDT 起始 PA，按块对齐 */
+	mov_q	x5, SWAPPER_RW_MMUFLAGS				/* FDT 映射属性：普通内存，可读写 */
+	mov	x6, #SWAPPER_BLOCK_SHIFT			/* 按块映射粒度更新 */
+	bl	remap_region					/* 将原始 FDT 物理区域重映射到内核后面的 ID map 窗口 */
 
 	/*
 	 * Since the page tables have been populated with non-cacheable
 	 * accesses (MMU disabled), invalidate those tables again to
 	 * remove any speculatively loaded cache lines.
 	 */
-	cbnz	x19, 0f				// skip cache invalidation if MMU is on
-	dmb	sy
+	cbnz	x19, 0f				// skip cache invalidation if MMU is on /* 若进入时 MMU 已开，跳过 ID map 页表的 D-cache 失效 */
+	dmb	sy				/* 确保前面对页表的写入先完成 */
 
-	adrp	x0, init_idmap_pg_dir
-	adrp	x1, init_idmap_pg_end
-	bl	dcache_inval_poc
+	adrp	x0, init_idmap_pg_dir		/* ID map 页表起始地址 */
+	adrp	x1, init_idmap_pg_end		/* ID map 页表结束地址（开区间上界） */
+	bl	dcache_inval_poc		/* 失效该页表范围的 D-cache，去掉可能的推测装载缓存行 */
 0:	ret	x28
 SYM_FUNC_END(create_idmap)
 
@@ -545,18 +590,24 @@ SYM_FUNC_END(__primary_switched)
  * x0: whether we are being called from the primary boot path with the MMU on
  */
 SYM_FUNC_START(init_kernel_el)
-	mrs	x1, CurrentEL
+	mrs	x1, CurrentEL		/* move reg from system */
 	cmp	x1, #CurrentEL_EL2
 	b.eq	init_el2
 
 SYM_INNER_LABEL(init_el1, SYM_L_LOCAL)
-	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF
+	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF	/* mov_q 把一个立即数装入64位寄存器 来自assembler.h:580 */
+						/* 写入立即数,M(mmu)=0,C(d-cache)=0,I(i-cache)=0 */
 	pre_disable_mmu_workaround
 	msr	sctlr_el1, x0
 	isb
-	mov_q	x0, INIT_PSTATE_EL1
-	msr	spsr_el1, x0
-	msr	elr_el1, lr
+	mov_q	x0, INIT_PSTATE_EL1		/* init_prosecosr_state_el1 */
+	msr	spsr_el1, x0			/* save program status reg */
+						/* msr/mrs 都是前=后 s=r r=s */
+						/* 发生异常时 硬件把异常前PSTATE保存到spsr_elx */
+						/* 随后 CPU 才切换到异常处理用的新 PSTATE */
+						/* 执行eret时,再把spsr_elx恢复回PSTATE */
+						/* eret 以后要恢复成什么 PSTATE */
+	msr	elr_el1, lr			/* eret 以后要跳到哪里 */
 	mov	w0, #BOOT_CPU_MODE_EL1
 	eret
 

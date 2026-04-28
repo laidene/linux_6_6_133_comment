@@ -60,7 +60,8 @@
 	.endm
 
 	.macro	enable_dbg
-	msr	daifclr, #8
+	msr	daifclr, #8	/* daif时pstate的四个异常屏蔽位 */
+				/* daifclr：把 imm 选中的 DAIF 位清为 0 */
 	.endm
 
 	.macro	disable_step_tsk, flgs, tmp
@@ -179,6 +180,10 @@ lr	.req	x30		// link register
 	/*
 	 * @dst: destination register (64 bit wide)
 	 * @sym: name of the symbol
+	 * adr_l <64位寄存器>, <符号名>
+	 * <dst> = align_down(pc, 0x1000) + (align_down(<sym>, 0x1000) - align_down(pc, 0x1000))
+	 * 	 = align_down(<sym>, 0x1000)
+	 * <dst> = <dst> + (<sym> & 0xffff)
 	 */
 	.macro	adr_l, dst, sym
 	adrp	\dst, \sym
@@ -307,12 +312,17 @@ alternative_cb_end
 
 /*
  * dcache_line_size - get the safe D-cache line size across all CPUs
+ * 从系统控制寄存器中计算 D-cache line size的实际大小到 reg
  */
 	.macro	dcache_line_size, reg, tmp
 	read_ctr	\tmp
 	ubfm		\tmp, \tmp, #16, #19	// cache line size encoding
+						/* 读取 ctr_el0[19:16] DminLine 到 <tmp> */
 	mov		\reg, #4		// bytes per word
 	lsl		\reg, \reg, \tmp	// actual cache line size
+						/* logical shift left */
+						/* DminLine = log2(实际值) 实际值 = 1 << DminLine */
+						/* 为什么是 4 << DminLine 因为 (1<<DminLine)*4(word大小) = (1 << 2) << DminLine */
 	.endm
 
 /*
@@ -503,7 +513,7 @@ alternative_endif
  */
 	.macro	reset_pmuserenr_el0, tmpreg
 	mrs	\tmpreg, id_aa64dfr0_el1
-	sbfx	\tmpreg, \tmpreg, #ID_AA64DFR0_EL1_PMUVer_SHIFT, #4
+	sbfx	\tmpreg, \tmpreg, #ID_AA64DFR0_EL1_PMUVer_SHIFT, #4	/* signed bitfiled extract */
 	cmp	\tmpreg, #1			// Skip if no PMU present
 	b.lt	9000f
 	msr	pmuserenr_el0, xzr		// Disable PMU access from EL0

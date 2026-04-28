@@ -141,21 +141,39 @@ SYM_FUNC_END(dcache_clean_pou)
  *
  *	- start   - kernel start address of region
  *	- end     - kernel end address of region
+ *
+ *	dcache_inval_poc(start, end)
+ *	x0 = start
+ *	0x = end
+* 	1. 读取安全的 D-cache line size
+ *	 2. 如果 end 没有按 cache line 对齐：
+ *	    先把 end 向下对齐到 cache line 边界，
+ *	    对尾部那条“部分覆盖”的 cache line 做 clean+invalidate
+ *	 3. 如果 start 没有按 cache line 对齐：
+ *	    先把 start 向下对齐到 cache line 边界，
+ *	    对头部那条“部分覆盖”的 cache line 做 clean+invalidate
+ *	 4. 对中间那些被区间 [start, end) 完整覆盖的 cache line，
+ *	    逐条做 invalidate
+ *	 5. 最后用 dsb sy 等待所有 cache maintenance 完成
+ *
  */
 SYM_FUNC_START(__pi_dcache_inval_poc)
-	dcache_line_size x2, x3
-	sub	x3, x2, #1
+	dcache_line_size x2, x3			/* arch/arm64/include/asm/assembler.h 计算x3的DminLine对应的字节实际值到x2 */
+	sub	x3, x2, #1			/* x3相当于 dcache_line_size 的 mask */
 	tst	x1, x3				// end cache line aligned?
-	bic	x1, x1, x3
-	b.eq	1f
+						/* test x1 & x3 */
+	bic	x1, x1, x3			/* 手动对齐end */
+	b.eq	1f				/* 如果相与为0,说明end本身就是dcache_line_size对齐的 */
 	dc	civac, x1			// clean & invalidate D / U line
+						/* 没有对齐,要先把end所在的cache line 做 clean 和 invalidate操作 */
 1:	tst	x0, x3				// start cache line aligned?
 	bic	x0, x0, x3
 	b.eq	2f
 	dc	civac, x0			// clean & invalidate D / U line
 	b	3f
 2:	dc	ivac, x0			// invalidate D / U line
-3:	add	x0, x0, x2
+						/* 没有对齐,要先把start所在的cache line 做 clean 和 invalidate操作 */
+3:	add	x0, x0, x2			/* 现在是遍历start和end clear invalidate中间的部分dcache-line */
 	cmp	x0, x1
 	b.lo	2b
 	dsb	sy

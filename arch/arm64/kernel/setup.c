@@ -83,6 +83,11 @@ static struct resource mem_res[] = {
 
 /*
  * The recorded values of x0 .. x3 upon kernel entry.
+ * 保存进入内核时,x0 .. x3 四个寄存器的值
+ * boot_args[0] = x0;
+ * boot_args[1] = x1;
+ * boot_args[2] = x2;
+ * boot_args[3] = x3;
  */
 u64 __cacheline_aligned boot_args[4];
 
